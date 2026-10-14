@@ -190,16 +190,20 @@ asset:<format>:<location>[?<key>=<value>&...]
 
 The two forms are told apart by what follows `asset:`. Two slashes mean a named descriptor or a path to one. Anything else is the inline form. Its first segment names a format adapter, or `auto` to pick one by file extension. The rest, up to the first `?`, is the location. It may be a URI or a local path, and it may be a nested location such as `zip:s3://bucket/archive.zip!/orders/`; a location that needs a query string of its own must percent-encode it. The query parameters are the descriptor's keys flattened with dots: `layout.mode`, `layout.partitioning`, `format.header`, `storage.s3.region`, `schema.year`. Keys beginning with `format.` are adapter options, and the adapter name itself comes from the URI. Values are percent-encoded, and `{{ env_var(NAME) }}` works in them as it does in a file.
 
-Curt's workbook, read once from Python:
+Curt's workbook, read once from Python, with the named range `Prices` selected as the object to scan:
 
 ```python
-from adbc_driver_manager import dbapi
+import adbc_driver_manager as adbc
+import pyarrow as pa
 
-with dbapi.connect(uri="asset:excel:file:///C:/data/budget.xlsx") as con:
-    with con.cursor() as cur:
-        cur.execute('SELECT * FROM "Prices"')
-        prices = cur.fetch_arrow_table()
+with adbc.AdbcDatabase(uri="asset:excel:file:///C:/data/budget.xlsx") as db, adbc.AdbcConnection(db) as con:
+    with adbc.AdbcStatement(con) as stmt:
+        stmt.set_options(**{"adbc.asset.object": "Prices"})
+        stream, _ = stmt.execute_query()
+        prices = pa.RecordBatchReader._import_from_c(stream.address).read_all()
 ```
+
+A tool that only sends query strings can do the same with the facade's optional shorthand, `SELECT * FROM "Prices"`; see the facade section below.
 
 The Hive-partitioned Parquet asset from above, inline:
 
@@ -406,14 +410,20 @@ The first phase implements reads only, but the ABI reserves the writer and commi
 
 The driver manager treats `asset://` in the `uri` option the way it treats `profile://` today, and no `driver` option is required.
 
-```python
-from adbc_driver_manager import dbapi
+A scan is a statement with options for the object, the columns, the predicate, and the limit. Predicate literals arrive through `Bind`. A single-object asset, such as a `table` layout, needs no object option.
 
-with dbapi.connect(uri="asset://acme_events") as con:
-    with con.cursor() as cur:
-        cur.execute("SELECT region, qty FROM events WHERE year = 2024 LIMIT 10")
-        print(cur.fetch_arrow_table())
+```python
+import adbc_driver_manager as adbc
+import pyarrow as pa
+
+with adbc.AdbcDatabase(uri="asset://acme_events") as db, adbc.AdbcConnection(db) as con:
+    with adbc.AdbcStatement(con) as stmt:
+        stmt.set_options(**{"adbc.asset.columns": "region,qty", "adbc.asset.limit": "10"})
+        stream, _ = stmt.execute_query()
+        print(pa.RecordBatchReader._import_from_c(stream.address).read_all())
 ```
+
+For tools that only know how to send a query string, the facade also accepts a restricted SQL shorthand that it parses into the same scan request: `SELECT region, qty FROM events LIMIT 10`. The shorthand is parsed once in the driver manager and never reaches an adapter. In the Python DB-API wrapper, `cursor.execute` takes a query string, which is why the SQL-free form above uses the lower-level statement objects; that is a binding ergonomics question rather than a design one, and bindings can add a convenience for scans.
 
 The facade maps the asset onto the ADBC API:
 
@@ -424,13 +434,13 @@ The facade maps the asset onto the ADBC API:
 | `GetObjects`, `GetTableSchema`, `GetTableTypes` | The asset's objects, schemas, and object types such as sheet or named range |
 | `GetStatistics` | Object-level statistics |
 | `GetInfo` | Adapter name and version as the vendor; the driver manager as the driver |
-| `SetSqlQuery` | A restricted scan grammar: `SELECT <columns or *> FROM <object> [WHERE <predicate>] [LIMIT n]`, with inline literals lifted into bound parameters by the facade |
-| Statement options `adbc.asset.object`, `.columns`, `.predicate`, `.limit` plus `Bind` | A structured scan with no SQL |
+| Statement options `adbc.asset.object`, `.columns`, `.predicate`, `.limit` plus `Bind` | A scan; this is the facade's interface |
+| `SetSqlQuery` | Optional shorthand: `SELECT <columns or *> FROM <object> [WHERE <predicate>] [LIMIT n]`, parsed into the same scan request, with inline literals lifted into bound parameters |
 | `ExecuteQuery` | All fragments as one stream |
 | `ExecutePartitions`, `ReadPartition` | Fragment tokens |
 | `Bind` with `adbc.ingest.*` | A write through the adapter |
 
-Anything beyond a scan, such as a join or an aggregate, returns `NOT_IMPLEMENTED` with a message that says to mount the asset into an engine. Accepting the restricted SQL form is a judgment call. It keeps tools like databow and every DB-API consumer working unchanged, which is most of the standalone value; the structured options are the canonical form and the SQL form is sugar parsed once in the driver manager. The design also works if the facade rejects `SetSqlQuery` entirely, and that would draw a harder line between adapters and SQL systems at the cost of the standalone story.
+Anything beyond a scan, such as a join or an aggregate, returns `NOT_IMPLEMENTED` with a message that says to mount the asset into an engine. Whether to ship the SQL shorthand at all is a judgment call. It keeps tools like databow and every DB-API consumer working unchanged, which is most of the standalone value, but it is the one place SQL comes near the asset path. The design works without it, and dropping it would draw a harder line between adapters and SQL systems at the cost of the standalone story.
 
 This is where Curt's mapping of ADBC concepts survives. Users see a database, a connection, objects, and partitioned statements, exactly as he described. Format authors implement none of it.
 
@@ -472,11 +482,11 @@ A descriptor is useful before any adapter runs. It is a vendor-neutral, git-comm
 
 **Capacity and the support matrix.** The surface the ASF project owns is deliberately small: the descriptor format, the two ABIs, the fragment schema and predicate grammar, the driver manager behaviors, three tiny built-ins, and conformance suites for adapters and providers. There are two core implementations, the C++ driver manager and the Rust driver manager, which is the matrix the project already maintains; Python, Go, R, Ruby, Java, and JavaScript inherit the facade through the C++ driver manager with no new binding API. Every real adapter and provider, including Excel, HDF5, Parquet, Iceberg, S3, and ZIP, lives outside the ASF repository and is installed from third-party registries, as tokoko's Iceberg driver already is. A conformance suite makes a sparse matrix explicit rather than silent. One governance rule would keep the matrix honest: a phase enters the specification only when both driver managers implement it and at least two adapters from different maintainers pass conformance. The funding question remains a question, but it is a question about two driver managers and a test suite rather than about every language binding.
 
-**Curt's four questions.** This is in scope for ADBC as a driver-manager-level specification, which is where profiles and manifests already live, and the two ABIs are usable by engines that never touch the rest of ADBC. "A statement is a scan of one object plus pushdown" is the right model for the ABI, expressed as a scan plan rather than a statement; the facade maps it onto statements, and `SetSqlQuery` means the restricted scan grammar there and nothing to an adapter. Substrait is optional, as above. The file-system ABI can stay close to the prototype because engines that care most about I/O performance supply their own file system or read fragments natively.
+**Curt's four questions.** This is in scope for ADBC as a driver-manager-level specification, which is where profiles and manifests already live, and the two ABIs are usable by engines that never touch the rest of ADBC. "A statement is a scan of one object plus pushdown" is the right model for the ABI, expressed as a scan plan rather than a statement; the facade maps it onto statements, and `SetSqlQuery` means the optional restricted shorthand there and nothing to an adapter. Substrait is optional, as above. The file-system ABI can stay close to the prototype because engines that care most about I/O performance supply their own file system or read fragments natively.
 
 ## Phasing
 
-**Phase 1, read files.** Descriptors and `asset://`. The storage ABI and provider registry as prototyped. The adapter ABI for reads. The `files` composite with table and collection layouts and Hive and directory partitioning. Adapter manifests and the registry. The facade with structured scans, the restricted SQL grammar, and partitioned execution. Built-ins: the local provider, the Arrow IPC adapter. Conformance tests for providers and adapters. Externally, Curt's Excel and CSV code and S3 and ZIP providers become the first third-party components.
+**Phase 1, read files.** Descriptors and `asset://`. The storage ABI and provider registry as prototyped. The adapter ABI for reads. The `files` composite with table and collection layouts and Hive and directory partitioning. Adapter manifests and the registry. The facade with structured scans, partitioned execution, and the optional SQL shorthand. Built-ins: the local provider, the Arrow IPC adapter. Conformance tests for providers and adapters. Externally, Curt's Excel and CSV code and S3 and ZIP providers become the first third-party components.
 
 **Phase 2, table formats and writes.** The table-format adapter kind and the `format` and `extras` fragment columns. The writer, commit, and storage write extension. Facade ingest. Profile `[Assets]` mounts with the ingest fallback and the native mount option. An Iceberg adapter outside the repository.
 
@@ -492,6 +502,7 @@ The `adbc_filesystem.h` header, the provider registry and manifests, the nested-
 - The encoding of object paths in SQL identifiers and the mapping of nested paths onto `GetObjects`, which has a fixed catalog and schema hierarchy (see apache/arrow-adbc#4564).
 - How much of Iceberg's `FileScanTask` belongs in the shared fragment columns versus `extras`.
 - Whether the facade should be a build-time option of the driver manager.
+- Whether the facade ships the restricted SQL shorthand at all, or only the structured scan options.
 - Schema pinning syntax in `[Schema]`, and schema unification rules across files in a `table` layout.
 - The trust model for descriptors found on a search path, which point at local paths and name environment variables; it should match profiles.
 - Whether assets can reference a profile for credentials, or whether storage options stay self-contained as drafted.
