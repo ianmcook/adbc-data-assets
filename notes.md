@@ -18,6 +18,9 @@ Checked October 13, 2026.
 | Oct 13 | CurtHagenlocher | Links the ADBC branch and the `datafusion-table-providers` branch `file-drivers`; demo joins an Excel named range with CSVs in a ZIP on S3 through DataFusion, with projection and filter pushdown and 12 partitions. |
 | Oct 13 | paleolimbot | SedonaDB has a DataFusion-specific extension mechanism for spatial formats; prefers an expression object over a serialized declarative form; parallel scans matter; would adopt ADBC if performance matches. |
 | Oct 14 | ianmcook | Agrees a "data asset" abstraction with interfaces and registries is valuable. Objections: reusing "driver" confuses users; Substrait likely impractical and risks "interoperability theater"; writes need design first; consider rolling together with an Iceberg driver or another object-storage table abstraction; who funds maintainer capacity across language implementations. |
+| Oct 14 | ianmcook | Links this proposal at ianmcook/adbc-data-assets and summarizes it: a data asset abstraction instead of reusing "driver," asset descriptors in TOML, and two new kinds of shared libraries, adapters and providers, each with a manifest and installable with dbc. |
+| Oct 14 | CurtHagenlocher | Asks whether reading `budget.xlsx` once from Python would require writing a TOML file or registering a custom provider. |
+| Oct 14 | ianmcook | Prefers a small predicate language over Substrait. Replies that all parameters could be defined inside an `asset://` URI, analogous to connection profiles coexisting with `drivername://` URIs, and says the proposal will be updated. |
 
 ## Curt's prototype
 
@@ -51,3 +54,7 @@ Arrow Datasets; DataFusion `TableProvider::scan` and `supports_filters_pushdown`
 - "Asset" rather than "dataset" avoids a collision with Arrow's Dataset API and matches the word Ian used in the thread.
 - The restricted SQL form in the facade is flagged as a judgment call in the proposal, since it is the one place the design lets SQL near the asset path.
 - Companies are not named in the capacity section; the proposal frames the funding question structurally and leaves commitments to the discussion.
+
+## Publication
+
+Copied to the repository at `/Users/ian/adbc-data-assets`, published as [ianmcook/adbc-data-assets](https://github.com/ianmcook/adbc-data-assets). The workspace copy is the working draft; sync changes to the repo when publishing.

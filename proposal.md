@@ -8,7 +8,7 @@ Curt's proposal has three parts: file drivers that understand one format, a C AB
 
 Around that change, this document proposes a single abstraction, the **data asset**, with four layers:
 
-1. **Asset descriptors.** A small TOML file, parallel to a connection profile, that says where data lives and what shape it has. It names a format and a location, not a driver. It is resolved by name through an `asset://` URI, and it has value on its own, outside of ADBC code paths.
+1. **Asset descriptors.** A small TOML file, parallel to a connection profile, that says where data lives and what shape it has. It names a format and a location, not a driver. It is resolved by name through an `asset://` URI, or written inline in an `asset:` URI when no file is wanted, and it has value on its own, outside of ADBC code paths.
 2. **Components and registries.** Three kinds of dynamically loaded components, each with its own manifest and registry in the driver manager: storage providers (bytes), format adapters (one file format), and table-format adapters (Iceberg, Delta, Lance, and the built-in `files` layout). None of them is a driver.
 3. **A scan model.** An asset exposes named objects. A scan of an object is planned into fragments that yield Arrow. Pushdown uses a small, closed predicate form with literals bound as Arrow data, not Substrait. Fragments are describable, so an engine that has its own Parquet reader can bypass the adapter for I/O.
 4. **Ways in.** Any ADBC application reaches an asset through the driver manager's built-in **asset facade**, with no new API in any language binding. A connection profile can mount assets into a SQL engine's driver. Engines can consume fragments directly. Tools can resolve a descriptor without scanning anything.
@@ -97,7 +97,7 @@ location = "s3://bucket/prefix/" # a URI; nested locations use Curt's zip:<inner
 [Schema]    # optional type pins, for partition columns and inference overrides
 ```
 
-Descriptors live in `~/.config/adbc/assets/` (with platform equivalents matching profiles), are found through `ADBC_ASSET_PATH`, and are referenced as `asset://<name>` or by absolute path. The driver manager accepts an `asset://` URI in the `uri` option the same way it accepts `profile://` today. As with profiles, a custom asset provider function can load descriptors from a catalog service or a vault instead of the file system.
+Descriptors live in `~/.config/adbc/assets/` (with platform equivalents matching profiles), are found through `ADBC_ASSET_PATH`, and are referenced as `asset://<name>` or by absolute path. A descriptor can also be written inline in a URI, with no file at all, as described below. The driver manager accepts an `asset://` URI in the `uri` option the same way it accepts `profile://` today. As with profiles, a custom asset provider function can load descriptors from a catalog service or a vault instead of the file system.
 
 ### An S3 bucket of Parquet files with Hive-style partitioning
 
@@ -177,6 +177,39 @@ glob = "*.csv"
 ```
 
 The Excel asset's objects are its sheets and named ranges, including `Prices`. The orders asset is one table over twelve CSVs, read through a ZIP provider layered on an S3 provider.
+
+### Descriptors without a file
+
+Curt asked whether reading `budget.xlsx` once from Python would mean writing a TOML file first or registering a custom asset provider. It would mean neither. Every descriptor key can be given inline in an `asset:` URI, so a descriptor file is for reuse and sharing rather than a prerequisite. This mirrors how the driver manager treats connection parameters today. A `profile://name` reference loads saved options from a file, while a URI such as `postgresql://user@host:5432/db` carries the parameters inline and names the driver by its scheme, and the `driver:scheme://...` form, such as `flightsql:grpc://host:port`, puts the driver name in front of the real URI.
+
+The inline form is:
+
+```
+asset:<format>:<location>[?<key>=<value>&...]
+```
+
+The two forms are told apart by what follows `asset:`. Two slashes mean a named descriptor or a path to one. Anything else is the inline form. Its first segment names a format adapter, or `auto` to pick one by file extension. The rest, up to the first `?`, is the location. It may be a URI or a local path, and it may be a nested location such as `zip:s3://bucket/archive.zip!/orders/`; a location that needs a query string of its own must percent-encode it. The query parameters are the descriptor's keys flattened with dots: `layout.mode`, `layout.partitioning`, `format.header`, `storage.s3.region`, `schema.year`. Keys beginning with `format.` are adapter options, and the adapter name itself comes from the URI. Values are percent-encoded, and `{{ env_var(NAME) }}` works in them as it does in a file.
+
+Curt's workbook, read once from Python:
+
+```python
+from adbc_driver_manager import dbapi
+
+with dbapi.connect(uri="asset:excel:file:///C:/data/budget.xlsx") as con:
+    with con.cursor() as cur:
+        cur.execute('SELECT * FROM "Prices"')
+        prices = cur.fetch_arrow_table()
+```
+
+The Hive-partitioned Parquet asset from above, inline:
+
+```
+asset:parquet:s3://acme-lake/events/?layout.partitioning=hive&schema.year=int32&schema.month=int32&storage.s3.region=us-east-1
+```
+
+The driver manager turns an inline URI into the same resolved descriptor that a file would produce, and the same precedence applies as for profiles: descriptor values first, then options set through `AdbcDatabaseSetOption`, which can also set individual descriptor keys under an `adbc.asset.` prefix to override one value without rewriting the URI. The inline form is accepted anywhere a named asset is, including the `uri` option, the `[Assets]` table of a connection profile, and the driver manager's resolve function, which can also write an inline URI out as a descriptor file once a one-off becomes something worth keeping.
+
+The format is deliberately not the first segment on its own. A URI such as `excel:file:///C:/data/budget.xlsx` would fall under the driver manager's existing `driver:scheme:` rule and make adapter names compete with driver names, which is the confusion this proposal is trying to avoid. The `asset:` prefix says unambiguously that the facade handles the URI.
 
 ## Components, manifests, and registries
 
